@@ -50,7 +50,7 @@ A production-style authentication API built using Flask that implements secure u
 ### 1. Clone Repository
 
 ```bash
-git clone https://github.com/simplyy-shadin/secure-flask-auth-api.git
+git clone https://github.com/yourusername/secure-flask-auth-api.git
 cd secure-flask-auth-api
 ```
 ### 2. Create Virtual Environment
@@ -70,17 +70,14 @@ source venv/bin/activate
 ```bash
 pip install -r requirements.txt
 ```
-### 5. Install Dependencies
-```bash
-pip install -r requirements.txt
-```
-### 6. Setup Environment Variables
-```bash
-Create .env file:
+### 5. Setup Environment Variables
 
+Create .env file:
+```bash
 SECRET_KEY=your-secret-key
 JWT_SECRET_KEY=your-jwt-secret
 ```
+
 ### 6. Run Application
 ```bash
 python app.py
