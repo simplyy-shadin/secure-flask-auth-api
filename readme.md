@@ -50,7 +50,7 @@ A production-style authentication API built using Flask that implements secure u
 ### 1. Clone Repository
 
 ```bash
-git clone https://github.com/yourusername/secure-flask-auth-api.git
+git clone https://github.com/simplyy-shadin/secure-flask-auth-api.git
 cd secure-flask-auth-api
 ```
 ### 2. Create Virtual Environment
