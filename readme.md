@@ -1,113 +1,176 @@
 # Secure Flask Authentication API
 
-A security-engineering project focused on **authentication, JWT/session lifecycle
-security, authorization, abuse resistance, and API security testing**.
+A security-engineering project focused on **authentication, MFA, JWT/session
+security, authorization, abuse resistance, and attack-focused API testing**.
 
-This repository is deliberately not a generic DevSecOps demo. Its purpose is to
-show how authentication systems fail and how those failure modes can be designed,
-implemented, and tested defensively.
+This repository intentionally goes deep on identity and API security. It is not a
+second DevSecOps scanner project.
 
-## Security architecture
-
-```text
-Client
-  |
-  v
-Authentication API
-  |
-  +-- Password security -------- Argon2id
-  +-- Login abuse defense ------ IP throttling + temporary account lock
-  +-- Access token ------------ short-lived JWT (10 min)
-  +-- Refresh token ----------- rotating, session-bound JWT
-  +-- Server-side session ----- revocable source of truth
-  +-- Authorization ----------- owner-or-admin + RBAC
-  +-- Audit trail ------------- security event records + request IDs
-
-Refresh replay
-  -> old refresh JTI detected
-  -> session revoked
-  -> access tokens from that session become unusable
-```
-
-## Security controls
+## What this project demonstrates
 
 - Argon2id password hashing
-- 12-128 character password policy with weak-password checks
-- Access + refresh JWT separation
-- Server-side authentication sessions
-- Refresh-token rotation
-- Refresh-token replay detection
-- Session revocation on logout
-- Logout from all sessions
-- Password-change session invalidation
-- User-visible active session inventory and revocation
-- Role-based access control
-- Owner-or-admin object authorization against BOLA/IDOR
-- Mass-assignment protection for privileged fields
-- Generic login and duplicate-registration responses
-- Dummy password verification for unknown users to reduce obvious timing differences
+- normalized usernames and email addresses
+- generic authentication failures to reduce account enumeration
+- dummy password verification for unknown users
 - IP login throttling and temporary per-account lockout
-- Request-size limits
-- Structured security audit events
-- Request correlation IDs
-- Defensive response headers
-- Controlled JSON/JWT/error responses
-- Attack-focused automated tests
+- short-lived JWT access tokens
+- rotating refresh tokens with replay detection
+- server-side revocable authentication sessions
+- five-active-session cap with oldest-session eviction
+- fresh-token step-up authentication for sensitive actions
+- TOTP multi-factor authentication
+- encrypted MFA secrets using a dedicated Fernet key
+- replay-safe, short-lived MFA login challenges
+- TOTP replay prevention
+- eight single-use Argon2-hashed recovery codes
+- MFA setup, status, disable, and recovery-code regeneration
+- RBAC plus owner-or-admin object authorization
+- BOLA/IDOR protection
+- mass-assignment privilege-escalation protection
+- password confirmation for self-service email changes
+- security-event history and request correlation IDs
+- JWT issuer/audience validation
+- versioned Alembic/Flask-Migrate database migrations
+- controlled JSON/JWT errors and defensive response headers
+- attack-oriented automated tests and coverage enforcement
 
-See [Threat Model](docs/THREAT_MODEL.md),
-[Security Controls](docs/SECURITY_CONTROLS.md), and
-[API Security Tests](docs/API_SECURITY_TESTS.md).
-
-## Authentication lifecycle
+## Authentication architecture
 
 ```text
-LOGIN
-  |
-  +--> server-side session
-          |
-          +--> short-lived access token
-          |
-          +--> refresh token (JTI stored server-side)
-                    |
-                    v
-                 REFRESH
-                    |
-          current JTI matches?
-              /           \
-            yes            no
-             |              |
-        rotate token    replay detected
-             |              |
-        replace JTI     revoke session
+                       PASSWORD LOGIN
+                             |
+                    +--------+--------+
+                    |                 |
+                 MFA off            MFA on
+                    |                 |
+                    v                 v
+             create session     MFA challenge token
+                    |                 |
+                    |          TOTP / recovery code
+                    |                 |
+                    |            challenge claimed
+                    |                 |
+                    +--------+--------+
+                             |
+                             v
+                     AuthSession record
+                             |
+                 +-----------+-----------+
+                 |                       |
+          fresh access JWT         refresh JWT
+             10 minutes              7 days max
+                 |                       |
+                 |                 refresh rotation
+                 |                       |
+                 |               current JTI replaced
+                 |                       |
+                 +-----------+-----------+
+                             |
+                     server-side session
+                        source of truth
 ```
 
-A valid JWT signature is therefore not enough by itself. The associated
-server-side session must still be valid.
+A valid JWT signature alone is not enough. Protected requests also require a
+valid server-side session belonging to an active user.
+
+## Refresh-token theft detection
+
+```text
+Refresh A used legitimately
+        |
+        v
+server stores Refresh B JTI
+
+stolen Refresh A used later
+        |
+        v
+presented JTI != current JTI
+        |
+        v
+refresh replay detected
+        |
+        v
+entire session revoked
+```
+
+## MFA design
+
+MFA is implemented as a two-stage login. Password verification does **not**
+create a fully authenticated session when MFA is enabled. Instead it returns a
+short-lived MFA challenge token.
+
+A successful challenge can use either:
+
+- a six-digit TOTP code, or
+- one single-use recovery code.
+
+MFA challenges are server-tracked and atomically consumed, so replaying the same
+challenge cannot create a second authenticated session.
+
+TOTP secrets are encrypted at rest with a dedicated Fernet key. Recovery codes
+are never stored in plaintext; they are Argon2-hashed and marked used after one
+successful redemption.
+
+TOTP improves resistance to password-only compromise, but it is **not
+phishing-resistant**. A production identity platform with stronger requirements
+would normally consider WebAuthn/passkeys or hardware-backed authenticators.
+
+## Step-up authentication
+
+Initial password/MFA login issues a **fresh** access token. Access tokens issued
+through refresh are intentionally non-fresh.
+
+Sensitive operations require a fresh token, including account mutation, session
+revocation, password changes, MFA changes, and administrative deletion.
+
+A user holding a valid non-fresh token can call:
+
+```http
+POST /reauth
+```
+
+with the current password and, when MFA is enabled, a TOTP or recovery code.
+Successful reauthentication returns a fresh access token for the same session.
 
 ## API endpoints
 
-### Authentication and sessions
+### Authentication and session security
 
 | Method | Endpoint | Purpose |
 |---|---|---|
 | `POST` | `/register` | Register a user |
-| `POST` | `/login` | Create a server-side session and token pair |
-| `POST` | `/refresh` | Rotate refresh token and issue a new token pair |
+| `POST` | `/login` | Password login or begin MFA challenge |
+| `POST` | `/mfa/verify-login` | Complete MFA login |
+| `POST` | `/refresh` | Rotate refresh token and issue non-fresh access token |
+| `POST` | `/reauth` | Step up to a fresh access token |
 | `POST` | `/logout` | Revoke current session |
-| `POST` | `/logout-all` | Revoke every session for the user |
+| `POST` | `/logout-all` | Revoke all sessions; fresh auth required |
 | `GET` | `/sessions` | View active sessions |
-| `DELETE` | `/sessions/<id>` | Revoke one owned session |
+| `DELETE` | `/sessions/<id>` | Revoke an owned session; fresh auth required |
 | `PUT` | `/password` | Change password and revoke all sessions |
 
-### Users
+### MFA
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/mfa/status` | View MFA state and unused recovery-code count |
+| `POST` | `/mfa/setup` | Generate encrypted TOTP enrollment secret |
+| `POST` | `/mfa/enable` | Verify TOTP and enable MFA |
+| `POST` | `/mfa/recovery-codes` | Regenerate recovery codes |
+| `POST` | `/mfa/disable` | Disable MFA with password + second factor |
+
+### Users and security events
 
 | Method | Endpoint | Authorization |
 |---|---|---|
 | `GET` | `/profile` | Current user |
+| `GET` | `/security-events` | Current user's security history |
 | `GET` | `/users` | Admin |
 | `GET` | `/users/<id>` | Owner or admin |
-| `PUT` | `/users/<id>` | Owner or admin; email only |
-| `DELETE` | `/users/<id>` | Admin |
+| `PUT` | `/users/<id>` | Owner/admin + fresh auth |
+| `DELETE` | `/users/<id>` | Admin + fresh auth |
+
+The machine-readable API contract is in [openapi.yaml](openapi.yaml).
 
 ## Local setup
 
@@ -123,44 +186,55 @@ pip install -r requirements-dev.txt
 cp .env.example .env
 ```
 
-Generate two different random secrets of at least 32 characters and put them in
-`.env`:
+Generate two independent application secrets:
 
 ```bash
 python -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
 
-Initialize the database and run the API:
+Generate the separate MFA encryption key:
 
 ```bash
-flask --app app.py init-db
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Put the generated values in `.env`, then apply the committed database
+migrations:
+
+```bash
+flask --app app.py db upgrade
+```
+
+If you have a database created by the earlier pre-migration version of this
+repository, follow [migrations/README](migrations/README) before upgrading.
+
+Run the API:
+
+```bash
 flask --app app.py run
 ```
 
-Create an administrator without exposing a role-change API:
+Create an administrator without exposing a public role-change endpoint:
 
 ```bash
 flask --app app.py create-admin
 ```
 
-The command prompts for the password without echoing it.
-
 ## Testing
 
 ```bash
-pytest --cov=secure_api --cov-report=term-missing
 ruff check .
+pytest --cov=secure_api --cov-report=term-missing --cov-fail-under=85
 ```
 
-The test suite covers refresh-token replay, logout revocation, password-change
-session invalidation, account lockout, BOLA/IDOR, RBAC, privileged-field
-injection, malformed JSON, authentication enforcement, session revocation, and
-security response headers.
+GitHub Actions also validates that the Alembic migration chain can build a fresh
+database before running the security test suite.
 
-GitHub Actions runs the same focused test suite and lint checks on pull requests
-and pushes to `main`. The CI is intentionally small because this repository's
-engineering focus is the authentication system itself rather than security
-scanner orchestration.
+The tests cover authentication failures, account lockout, refresh replay,
+session revocation, session caps, fresh-token enforcement, MFA enrollment,
+challenge replay, recovery-code replay, BOLA/IDOR, RBAC, mass assignment,
+token-type confusion, malformed input, security headers, and security-event
+history.
 
 ## Configuration
 
@@ -168,13 +242,14 @@ scanner orchestration.
 |---|---|---|
 | `SECRET_KEY` | Flask secret | required |
 | `JWT_SECRET_KEY` | JWT signing secret | required |
+| `MFA_ENCRYPTION_KEY` | Fernet key for TOTP secrets | required |
 | `DATABASE_URL` | SQLAlchemy database URL | `sqlite:///users.db` |
 | `RATELIMIT_STORAGE_URI` | Flask-Limiter backend | `memory://` |
 | `APP_ENV` | Enables production-only behavior such as HSTS | `development` |
 
-For multi-process or multi-instance deployments, use a production database and
-shared rate-limit storage. Configure forwarding headers only behind a trusted
-reverse proxy.
+For multi-process or multi-instance deployment, use a production database and a
+shared rate-limit backend. Forwarded client-IP headers should only be trusted
+after configuring a known reverse proxy.
 
 ## Repository structure
 
@@ -182,40 +257,46 @@ reverse proxy.
 .
 ├── app.py
 ├── config.py
+├── openapi.yaml
+├── migrations/
+│   ├── env.py
+│   └── versions/
 ├── secure_api/
 │   ├── __init__.py
 │   ├── auth.py
 │   ├── audit.py
 │   ├── extensions.py
+│   ├── mfa.py
+│   ├── mfa_routes.py
 │   ├── models.py
 │   ├── security.py
+│   ├── security_events.py
+│   ├── session_service.py
 │   └── users.py
 ├── tests/
 │   ├── conftest.py
 │   ├── test_api_security.py
 │   ├── test_auth.py
-│   └── test_authorization.py
-├── docs/
-│   ├── API_SECURITY_TESTS.md
-│   ├── SECURITY_CONTROLS.md
-│   └── THREAT_MODEL.md
-├── SECURITY.md
-├── requirements.txt
-├── requirements-dev.txt
-└── .github/workflows/ci.yml
+│   ├── test_authorization.py
+│   ├── test_identity_security.py
+│   └── test_mfa.py
+└── docs/
+    ├── API_SECURITY_TESTS.md
+    ├── SECURITY_CONTROLS.md
+    └── THREAT_MODEL.md
 ```
 
-## Project scope
+## Project boundary
 
-This project intentionally goes deep on **authentication and API security**.
+The deliberate scope is **authentication and API security engineering**.
 Infrastructure-as-code scanning, container orchestration, broad SAST/SCA
-pipelines, cloud deployment automation, and full DevSecOps platform concerns are
-kept outside the core project so this repository retains a clear
-security-engineering identity.
+orchestration, cloud provisioning, and full DevSecOps pipeline design are kept
+outside this repository so it remains complementary to a separate DevSecOps
+project rather than duplicating one.
 
 ## Author
 
 **Shadin K V**
 
-Cybersecurity student focused on Security Engineering, Application Security,
-and offensive/defensive security.
+Cybersecurity student focused on Security Engineering, Application Security, and
+offensive/defensive security.
