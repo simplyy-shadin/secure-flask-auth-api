@@ -1,0 +1,11 @@
+Single-database Alembic configuration for the Secure Flask Authentication API.
+
+Apply the committed schema with:
+
+    flask --app app.py db upgrade
+
+Create a new revision after changing SQLAlchemy models with:
+
+    flask --app app.py db migrate -m "describe the schema change"
+
+Review generated revisions before committing them.
