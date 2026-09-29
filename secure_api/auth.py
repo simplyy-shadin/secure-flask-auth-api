@@ -1,27 +1,23 @@
-from uuid import uuid4
-
 from flask import Blueprint, current_app, jsonify, request
-from flask_jwt_extended import (
-    create_access_token,
-    create_refresh_token,
-    decode_token,
-    get_jwt,
-    get_jwt_identity,
-    jwt_required,
-)
+from flask_jwt_extended import get_jwt, get_jwt_identity, jwt_required
 
 from .audit import record_event
 from .extensions import db, limiter
-from .models import AuthSession, User, utcnow
+from .mfa import create_login_challenge, verify_second_factor
+from .models import AuthSession, User
 from .security import (
     dummy_password_check,
     lock_user_after_failure,
     normalize_email,
     normalize_username,
-    safe_user_agent,
-    source_ip,
     validate_password,
     validate_username,
+)
+from .session_service import (
+    create_session,
+    issue_access_token,
+    issue_token_pair,
+    revoke_sessions,
 )
 
 
@@ -33,29 +29,6 @@ def _json_body():
     if not isinstance(data, dict):
         return None
     return data
-
-
-def _issue_token_pair(user, session):
-    # Authorization reads current roles from the database, not from stale JWT claims.
-    claims = {"sid": session.id}
-    access_token = create_access_token(identity=str(user.id), additional_claims=claims)
-
-    remaining = session.expires_at - utcnow()
-    refresh_token = create_refresh_token(
-        identity=str(user.id),
-        additional_claims=claims,
-        expires_delta=remaining,
-    )
-    session.refresh_jti = decode_token(refresh_token)["jti"]
-    session.last_rotated_at = utcnow()
-    return access_token, refresh_token
-
-
-def _revoke_all_sessions(user_id, reason):
-    sessions = AuthSession.query.filter_by(user_id=user_id, revoked_at=None).all()
-    for session in sessions:
-        session.revoke(reason)
-    return len(sessions)
 
 
 @auth_bp.post("/register")
@@ -77,7 +50,6 @@ def register():
     if User.query.filter(
         (User.username == username) | (User.email == email)
     ).first():
-        # Avoid revealing which identifier is already registered.
         return jsonify(
             error="Account cannot be created with those details",
             code="conflict",
@@ -133,7 +105,6 @@ def login():
 
     if user.is_locked():
         record_event("AUTH_LOGIN_BLOCKED", user_id=user.id)
-        # Keep account-lock responses indistinguishable from credential failures.
         return jsonify(
             error="Invalid credentials",
             code="authentication_failed",
@@ -155,17 +126,34 @@ def login():
     user.failed_login_count = 0
     user.locked_until = None
 
-    session = AuthSession(
-        id=str(uuid4()),
-        user_id=user.id,
-        refresh_jti=str(uuid4()),
-        expires_at=utcnow() + current_app.config["JWT_REFRESH_TOKEN_EXPIRES"],
-        source_ip=source_ip(),
-        user_agent=safe_user_agent(),
+    if user.mfa_enabled:
+        challenge, mfa_token = create_login_challenge(user)
+        db.session.commit()
+        record_event(
+            "AUTH_MFA_CHALLENGE_ISSUED",
+            user_id=user.id,
+            details={"challenge_id": challenge.id},
+        )
+        return jsonify(
+            mfa_required=True,
+            mfa_token=mfa_token,
+            expires_in=current_app.config["MFA_CHALLENGE_MINUTES"] * 60,
+        ), 202
+
+    session, revoked_ids = create_session(user, mfa_authenticated=False)
+    access_token, refresh_token = issue_token_pair(
+        user,
+        session,
+        fresh_access=True,
     )
-    db.session.add(session)
-    access_token, refresh_token = _issue_token_pair(user, session)
     db.session.commit()
+
+    if revoked_ids:
+        record_event(
+            "AUTH_SESSION_LIMIT_ENFORCED",
+            user_id=user.id,
+            details={"revoked_sessions": len(revoked_ids)},
+        )
     record_event(
         "AUTH_LOGIN_SUCCESS",
         user_id=user.id,
@@ -212,7 +200,6 @@ def refresh():
         ), 401
 
     if session.refresh_jti != presented_jti:
-        # A previously rotated refresh token is a possible token-theft signal.
         session.revoke("refresh_token_reuse")
         db.session.commit()
         record_event(
@@ -225,7 +212,11 @@ def refresh():
             code="token_reuse_detected",
         ), 401
 
-    access_token, refresh_token = _issue_token_pair(user, session)
+    access_token, refresh_token = issue_token_pair(
+        user,
+        session,
+        fresh_access=False,
+    )
     db.session.commit()
     record_event(
         "AUTH_TOKEN_REFRESH",
@@ -241,6 +232,63 @@ def refresh():
             current_app.config["JWT_ACCESS_TOKEN_EXPIRES"].total_seconds()
         ),
     )
+
+
+@auth_bp.post("/reauth")
+@jwt_required()
+@limiter.limit("10 per hour")
+def reauthenticate():
+    data = _json_body()
+    if data is None:
+        return jsonify(error="Invalid JSON body", code="invalid_request"), 400
+
+    user_id = int(get_jwt_identity())
+    user = db.session.get(User, user_id)
+    session_id = get_jwt().get("sid")
+    session = db.session.get(AuthSession, session_id) if session_id else None
+    password = data.get("current_password")
+
+    if (
+        user is None
+        or session is None
+        or not isinstance(password, str)
+        or not user.check_password(password)
+    ):
+        record_event("AUTH_REAUTH_FAILURE", user_id=user_id)
+        return jsonify(
+            error="Reauthentication failed",
+            code="authentication_failed",
+        ), 401
+
+    factor = "password"
+    if user.mfa_enabled:
+        factor = verify_second_factor(user, data, allow_recovery=True)
+        if factor is None:
+            db.session.rollback()
+            record_event("AUTH_REAUTH_FAILURE", user_id=user.id)
+            return jsonify(
+                error="Reauthentication failed",
+                code="authentication_failed",
+            ), 401
+
+    access_token = issue_access_token(
+        user,
+        session,
+        fresh=True,
+    )
+    db.session.commit()
+    record_event(
+        "AUTH_REAUTH_SUCCESS",
+        user_id=user.id,
+        details={"factor": factor},
+    )
+    return jsonify(
+        access_token=access_token,
+        token_type="Bearer",
+        expires_in=int(
+            current_app.config["JWT_ACCESS_TOKEN_EXPIRES"].total_seconds()
+        ),
+    ), 200
 
 
 @auth_bp.post("/logout")
@@ -261,10 +309,10 @@ def logout():
 
 
 @auth_bp.post("/logout-all")
-@jwt_required()
+@jwt_required(fresh=True)
 def logout_all():
     user_id = int(get_jwt_identity())
-    count = _revoke_all_sessions(user_id, "logout_all")
+    count = revoke_sessions(user_id, "logout_all")
     db.session.commit()
     record_event(
         "AUTH_LOGOUT_ALL",
@@ -296,12 +344,11 @@ def sessions():
                 "id": session.id,
                 "current": session.id == current_session_id,
                 "created_at": session.created_at.isoformat() + "Z",
-                "last_rotated_at": (
-                    session.last_rotated_at.isoformat() + "Z"
-                ),
+                "last_rotated_at": session.last_rotated_at.isoformat() + "Z",
                 "expires_at": session.expires_at.isoformat() + "Z",
                 "source_ip": session.source_ip,
                 "user_agent": session.user_agent,
+                "mfa_authenticated": session.mfa_authenticated,
             }
             for session in active_sessions
         ]
@@ -309,7 +356,7 @@ def sessions():
 
 
 @auth_bp.delete("/sessions/<string:session_id>")
-@jwt_required()
+@jwt_required(fresh=True)
 def revoke_session(session_id):
     user_id = int(get_jwt_identity())
     session = db.session.get(AuthSession, session_id)
@@ -327,7 +374,7 @@ def revoke_session(session_id):
 
 
 @auth_bp.put("/password")
-@jwt_required()
+@jwt_required(fresh=True)
 @limiter.limit("5 per hour")
 def change_password():
     data = _json_body()
@@ -360,7 +407,7 @@ def change_password():
         return jsonify(error=str(exc), code="validation_error"), 400
 
     user.set_password(new_password)
-    revoked = _revoke_all_sessions(user.id, "password_changed")
+    revoked = revoke_sessions(user.id, "password_changed")
     db.session.commit()
     record_event(
         "AUTH_PASSWORD_CHANGED",
