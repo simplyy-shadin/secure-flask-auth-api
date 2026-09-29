@@ -1,13 +1,17 @@
 import hmac
 import secrets
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pyotp
 from argon2.exceptions import InvalidHashError, VerifyMismatchError
 from cryptography.fernet import Fernet, InvalidToken
 from flask import current_app
+from flask_jwt_extended import create_access_token
 
-from .models import MfaRecoveryCode, password_hasher, utcnow
+from .extensions import db
+from .models import MfaChallenge, MfaRecoveryCode, password_hasher, utcnow
+from .security import source_ip
 
 
 def _fernet():
@@ -36,6 +40,29 @@ def provisioning_uri(user, secret):
         name=user.email,
         issuer_name=current_app.config["TOTP_ISSUER_NAME"],
     )
+
+
+def create_login_challenge(user):
+    challenge = MfaChallenge(
+        id=str(uuid4()),
+        user_id=user.id,
+        expires_at=utcnow()
+        + timedelta(minutes=current_app.config["MFA_CHALLENGE_MINUTES"]),
+        source_ip=source_ip(),
+    )
+    db.session.add(challenge)
+    mfa_token = create_access_token(
+        identity=str(user.id),
+        additional_claims={
+            "stage": "mfa_login",
+            "cid": challenge.id,
+        },
+        expires_delta=timedelta(
+            minutes=current_app.config["MFA_CHALLENGE_MINUTES"]
+        ),
+        fresh=False,
+    )
+    return challenge, mfa_token
 
 
 def _matched_totp_step(secret, code):
