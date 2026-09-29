@@ -25,10 +25,19 @@ class User(db.Model):
     is_active = db.Column(db.Boolean, nullable=False, default=True)
     failed_login_count = db.Column(db.Integer, nullable=False, default=0)
     locked_until = db.Column(db.DateTime, nullable=True)
+    mfa_enabled = db.Column(db.Boolean, nullable=False, default=False)
+    mfa_secret_encrypted = db.Column(db.Text, nullable=True)
+    mfa_last_used_step = db.Column(db.BigInteger, nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=utcnow)
 
     sessions = db.relationship(
         "AuthSession", back_populates="user", cascade="all, delete-orphan"
+    )
+    recovery_codes = db.relationship(
+        "MfaRecoveryCode", back_populates="user", cascade="all, delete-orphan"
+    )
+    mfa_challenges = db.relationship(
+        "MfaChallenge", back_populates="user", cascade="all, delete-orphan"
     )
 
     def set_password(self, password):
@@ -60,6 +69,7 @@ class AuthSession(db.Model):
     revoke_reason = db.Column(db.String(64), nullable=True)
     source_ip = db.Column(db.String(45), nullable=True)
     user_agent = db.Column(db.String(255), nullable=True)
+    mfa_authenticated = db.Column(db.Boolean, nullable=False, default=False)
 
     user = db.relationship("User", back_populates="sessions")
 
@@ -70,6 +80,39 @@ class AuthSession(db.Model):
         if self.revoked_at is None:
             self.revoked_at = utcnow()
             self.revoke_reason = reason
+
+
+class MfaRecoveryCode(db.Model):
+    __tablename__ = "mfa_recovery_codes"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    code_hash = db.Column(db.String(255), nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False, default=utcnow)
+    used_at = db.Column(db.DateTime, nullable=True, index=True)
+
+    user = db.relationship("User", back_populates="recovery_codes")
+
+
+class MfaChallenge(db.Model):
+    __tablename__ = "mfa_challenges"
+
+    id = db.Column(db.String(36), primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=utcnow)
+    expires_at = db.Column(db.DateTime, nullable=False, index=True)
+    consumed_at = db.Column(db.DateTime, nullable=True, index=True)
+    attempts = db.Column(db.Integer, nullable=False, default=0)
+    source_ip = db.Column(db.String(45), nullable=True)
+
+    user = db.relationship("User", back_populates="mfa_challenges")
+
+    def is_valid(self, max_attempts):
+        return (
+            self.consumed_at is None
+            and self.expires_at > utcnow()
+            and self.attempts < max_attempts
+        )
 
 
 class AuditEvent(db.Model):

@@ -1,0 +1,677 @@
+openapi: 3.1.0
+info:
+  title: Secure Flask Authentication API
+  version: 3.0.0
+  description: >
+    Authentication and API-security reference implementation with Argon2id,
+    rotating refresh tokens, server-side sessions, TOTP MFA, step-up
+    authentication, RBAC, BOLA protection, and security-event visibility.
+servers:
+  - url: http://127.0.0.1:5000
+
+tags:
+  - name: Authentication
+  - name: MFA
+  - name: Sessions
+  - name: Users
+  - name: Security
+
+paths:
+  /register:
+    post:
+      tags: [Authentication]
+      summary: Register a user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        "201":
+          description: User registered
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /login:
+    post:
+      tags: [Authentication]
+      summary: Authenticate with username and password
+      description: >
+        Returns a token pair when MFA is disabled. When MFA is enabled, returns
+        a short-lived MFA challenge token instead of creating an authenticated
+        session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Authentication complete
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenPair"
+        "202":
+          description: MFA verification required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MfaChallengeResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /mfa/verify-login:
+    post:
+      tags: [MFA]
+      summary: Complete an MFA login challenge
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  required: [code]
+                  properties:
+                    code:
+                      type: string
+                      pattern: "^[0-9]{6}$"
+                - type: object
+                  required: [recovery_code]
+                  properties:
+                    recovery_code:
+                      type: string
+      responses:
+        "200":
+          description: MFA authentication complete
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenPair"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /refresh:
+    post:
+      tags: [Authentication]
+      summary: Rotate refresh token
+      description: Returns a new refresh token and a non-fresh access token.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Token pair rotated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenPair"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /reauth:
+    post:
+      tags: [Authentication]
+      summary: Obtain a fresh access token for sensitive actions
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReauthRequest"
+      responses:
+        "200":
+          description: Fresh access token issued
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /logout:
+    post:
+      tags: [Sessions]
+      summary: Revoke the current session
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Session revoked
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /logout-all:
+    post:
+      tags: [Sessions]
+      summary: Revoke all user sessions
+      x-requires-fresh-token: true
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: All sessions revoked
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /sessions:
+    get:
+      tags: [Sessions]
+      summary: List active sessions
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Active sessions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /sessions/{session_id}:
+    delete:
+      tags: [Sessions]
+      summary: Revoke an owned session
+      x-requires-fresh-token: true
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: session_id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Session revoked
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /password:
+    put:
+      tags: [Authentication]
+      summary: Change password and revoke all sessions
+      x-requires-fresh-token: true
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              properties:
+                current_password:
+                  type: string
+                new_password:
+                  type: string
+                  minLength: 12
+                  maxLength: 128
+      responses:
+        "200":
+          description: Password changed
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /mfa/status:
+    get:
+      tags: [MFA]
+      summary: Get MFA status
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: MFA state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled:
+                    type: boolean
+                  recovery_codes_remaining:
+                    type: integer
+                    minimum: 0
+
+  /mfa/setup:
+    post:
+      tags: [MFA]
+      summary: Begin TOTP enrollment
+      x-requires-fresh-token: true
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password]
+              properties:
+                current_password:
+                  type: string
+      responses:
+        "200":
+          description: TOTP secret and provisioning URI
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  manual_secret:
+                    type: string
+                  provisioning_uri:
+                    type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /mfa/enable:
+    post:
+      tags: [MFA]
+      summary: Verify TOTP and enable MFA
+      x-requires-fresh-token: true
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code:
+                  type: string
+                  pattern: "^[0-9]{6}$"
+      responses:
+        "200":
+          description: MFA enabled and recovery codes returned once
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /mfa/recovery-codes:
+    post:
+      tags: [MFA]
+      summary: Regenerate MFA recovery codes
+      x-requires-fresh-token: true
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, code]
+              properties:
+                current_password:
+                  type: string
+                code:
+                  type: string
+                  pattern: "^[0-9]{6}$"
+      responses:
+        "200":
+          description: New recovery codes returned once
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /mfa/disable:
+    post:
+      tags: [MFA]
+      summary: Disable MFA and revoke all sessions
+      x-requires-fresh-token: true
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - type: object
+                  required: [current_password]
+                  properties:
+                    current_password:
+                      type: string
+                - oneOf:
+                    - type: object
+                      required: [code]
+                      properties:
+                        code:
+                          type: string
+                          pattern: "^[0-9]{6}$"
+                    - type: object
+                      required: [recovery_code]
+                      properties:
+                        recovery_code:
+                          type: string
+      responses:
+        "200":
+          description: MFA disabled
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /profile:
+    get:
+      tags: [Users]
+      summary: Get current user profile
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /users:
+    get:
+      tags: [Users]
+      summary: List users
+      description: Admin only.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Users
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/User"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /users/{user_id}:
+    get:
+      tags: [Users]
+      summary: Get one user
+      description: Owner or admin.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          description: User
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [Users]
+      summary: Update email
+      description: Owner or admin. Fresh token required.
+      x-requires-fresh-token: true
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email:
+                  type: string
+                  format: email
+                current_password:
+                  type: string
+                  description: Required for self-service changes.
+      responses:
+        "200":
+          description: User updated
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    delete:
+      tags: [Users]
+      summary: Delete a user
+      description: Admin only. Fresh token required.
+      x-requires-fresh-token: true
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          description: User deleted
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /security-events:
+    get:
+      tags: [Security]
+      summary: View current user's recent security events
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        "200":
+          description: Security events
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SecurityEvent"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    UserId:
+      in: path
+      name: user_id
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+
+  schemas:
+    RegisterRequest:
+      type: object
+      required: [username, email, password]
+      properties:
+        username:
+          type: string
+          minLength: 3
+          maxLength: 32
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 12
+          maxLength: 128
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+
+    ReauthRequest:
+      type: object
+      required: [current_password]
+      properties:
+        current_password:
+          type: string
+        code:
+          type: string
+          pattern: "^[0-9]{6}$"
+          description: Required when MFA is enabled unless a recovery code is used.
+        recovery_code:
+          type: string
+
+    TokenPair:
+      type: object
+      required: [access_token, refresh_token, token_type, expires_in]
+      properties:
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+        token_type:
+          type: string
+          const: Bearer
+        expires_in:
+          type: integer
+
+    MfaChallengeResponse:
+      type: object
+      required: [mfa_required, mfa_token, expires_in]
+      properties:
+        mfa_required:
+          type: boolean
+          const: true
+        mfa_token:
+          type: string
+        expires_in:
+          type: integer
+
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+        username:
+          type: string
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+        mfa_enabled:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    Session:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        current:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        last_rotated_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        source_ip:
+          type: [string, "null"]
+        user_agent:
+          type: [string, "null"]
+        mfa_authenticated:
+          type: boolean
+
+    SecurityEvent:
+      type: object
+      properties:
+        event_type:
+          type: string
+        request_id:
+          type: string
+          format: uuid
+        source_ip:
+          type: [string, "null"]
+        details:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+
+    Error:
+      type: object
+      required: [error, code]
+      properties:
+        error:
+          type: string
+        code:
+          type: string
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: Authentication or recent-authentication failure
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: Authenticated but not authorized
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: Resource state conflict
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"

@@ -1,0 +1,28 @@
+Single-database Alembic configuration for the Secure Flask Authentication API.
+
+## New database
+
+Apply the complete committed schema with:
+
+    flask --app app.py db upgrade
+
+## Existing database from the pre-migration project
+
+The first committed revision represents the schema that existed before MFA was
+added. If you already have that development database, mark it as the baseline
+without recreating tables, then apply the MFA migration:
+
+    flask --app app.py db stamp 20260929_01
+    flask --app app.py db upgrade
+
+Back up any database you care about before applying migrations.
+
+## Future model changes
+
+Create a revision with:
+
+    flask --app app.py db migrate -m "describe the schema change"
+
+Review generated revisions before committing them. Alembic autogeneration is a
+starting point, not a substitute for reviewing indexes, constraints, defaults,
+and data migrations.

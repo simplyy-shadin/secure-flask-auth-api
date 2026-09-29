@@ -6,7 +6,8 @@ from flask import Flask, g, jsonify
 
 from config import Config, validate_runtime_secrets
 from .auth import auth_bp
-from .extensions import db, jwt, limiter
+from .extensions import db, jwt, limiter, migrate
+from .mfa_routes import mfa_bp
 from .models import AuthSession, User
 from .security import (
     normalize_email,
@@ -14,6 +15,7 @@ from .security import (
     validate_password,
     validate_username,
 )
+from .security_events import security_events_bp
 from .users import users_bp
 
 
@@ -30,8 +32,16 @@ def create_app(config_object=Config):
     db.init_app(app)
     jwt.init_app(app)
     limiter.init_app(app)
+    migrate.init_app(
+        app,
+        db,
+        compare_type=True,
+        render_as_batch=True,
+    )
 
     app.register_blueprint(auth_bp)
+    app.register_blueprint(mfa_bp)
+    app.register_blueprint(security_events_bp)
     app.register_blueprint(users_bp)
 
     @app.before_request
@@ -61,7 +71,7 @@ def create_app(config_object=Config):
     def home():
         return jsonify(
             name="Secure Flask Authentication API",
-            focus="Authentication and API security",
+            focus="Authentication, MFA, session, and API security",
             status="ok",
         )
 
@@ -123,6 +133,13 @@ def create_app(config_object=Config):
             code="token_revoked",
         ), 401
 
+    @jwt.needs_fresh_token_loader
+    def fresh_token_required(jwt_header, jwt_payload):
+        return jsonify(
+            error="Recent authentication is required",
+            code="fresh_token_required",
+        ), 401
+
     @app.errorhandler(404)
     def not_found(error):
         return jsonify(error="Resource not found", code="not_found"), 404
@@ -153,11 +170,6 @@ def create_app(config_object=Config):
             error="Internal server error",
             code="internal_error",
         ), 500
-
-    @app.cli.command("init-db")
-    def init_db_command():
-        db.create_all()
-        click.echo("Database initialized.")
 
     @app.cli.command("create-admin")
     @click.option("--username", prompt=True)
