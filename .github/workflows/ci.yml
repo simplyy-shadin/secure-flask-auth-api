@@ -12,6 +12,12 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      SECRET_KEY: ci-flask-secret-key-that-is-long-enough-2026
+      JWT_SECRET_KEY: ci-jwt-secret-key-that-is-different-and-long-2026
+      MFA_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      DATABASE_URL: sqlite:///migration-test.db
+
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -27,6 +33,9 @@ jobs:
 
       - name: Lint
         run: ruff check .
+
+      - name: Validate database migration
+        run: flask --app app.py db upgrade
 
       - name: Run authentication and API security tests
         run: pytest --cov=secure_api --cov-report=term-missing --cov-fail-under=85
