@@ -7,6 +7,7 @@ from flask import Flask, g, jsonify
 from config import Config, validate_runtime_secrets
 from .auth import auth_bp
 from .extensions import db, jwt, limiter
+from .mfa_routes import mfa_bp
 from .models import AuthSession, User
 from .security import (
     normalize_email,
@@ -14,6 +15,7 @@ from .security import (
     validate_password,
     validate_username,
 )
+from .security_events import security_events_bp
 from .users import users_bp
 
 
@@ -32,6 +34,8 @@ def create_app(config_object=Config):
     limiter.init_app(app)
 
     app.register_blueprint(auth_bp)
+    app.register_blueprint(mfa_bp)
+    app.register_blueprint(security_events_bp)
     app.register_blueprint(users_bp)
 
     @app.before_request
@@ -61,7 +65,7 @@ def create_app(config_object=Config):
     def home():
         return jsonify(
             name="Secure Flask Authentication API",
-            focus="Authentication and API security",
+            focus="Authentication, MFA, session, and API security",
             status="ok",
         )
 
@@ -121,6 +125,13 @@ def create_app(config_object=Config):
         return jsonify(
             error="Authentication token revoked",
             code="token_revoked",
+        ), 401
+
+    @jwt.needs_fresh_token_loader
+    def fresh_token_required(jwt_header, jwt_payload):
+        return jsonify(
+            error="Recent authentication is required",
+            code="fresh_token_required",
         ), 401
 
     @app.errorhandler(404)
