@@ -1,67 +1,129 @@
 # Security Controls
 
-## Authentication
+## Password authentication
 
 Passwords are hashed with Argon2id. Usernames and email addresses are normalized
-before storage. Authentication failures use generic responses, and unknown
-usernames still execute a dummy Argon2 verification to reduce obvious timing
-differences.
+before storage. Unknown usernames still execute a dummy Argon2 verification to
+reduce an obvious timing difference. Authentication failures deliberately avoid
+revealing whether an account exists, is inactive, or is temporarily locked.
 
-Login is protected in two layers: an IP-oriented Flask-Limiter policy and a
-short temporary per-account lock after repeated incorrect passwords. Locked
-accounts still receive the same generic credential failure response.
+Login uses both IP-oriented rate limiting and temporary per-account lockout.
 
-## Session and JWT security
+## JWT and server-side session security
 
-JWTs are not treated as the sole source of truth. Every token carries a
-server-generated session identifier (`sid`). Protected requests verify that the
-session still exists, belongs to the JWT subject, has not been revoked, has not
-expired, and belongs to an active user.
+JWTs are not treated as the sole source of truth. Every normal access/refresh
+token carries a server-generated session identifier (`sid`). Protected requests
+verify that the session exists, belongs to the JWT subject, remains active, has
+not expired, and belongs to an active user.
+
+JWTs also carry explicit issuer and audience values for this API.
 
 Access tokens live for 10 minutes. Refresh sessions have a seven-day maximum
-lifetime. Each successful refresh rotates the refresh token and replaces its
-stored JTI. Reusing an older refresh token is treated as a possible theft signal
-and revokes the whole session.
+lifetime. Each successful refresh rotates the refresh token and replaces the
+stored JTI. Presenting an older refresh token is treated as a possible theft
+signal and revokes the session.
 
-Logout revokes the current server-side session. `POST /logout-all` revokes every
-session for the current user. A password change also revokes all sessions and
-requires a fresh sign-in.
+A user may keep at most five active sessions. Creating a sixth session revokes
+the oldest valid session.
+
+## Fresh-token step-up authentication
+
+Initial password/MFA authentication issues a fresh access token. A token issued
+by the refresh endpoint is non-fresh.
+
+Sensitive endpoints use `jwt_required(fresh=True)`. A valid non-fresh token can
+be upgraded through `POST /reauth` only after the current password is verified
+and, when MFA is enabled, a second factor is verified.
+
+This separates ordinary session continuity from recent proof of identity.
+
+## TOTP MFA
+
+MFA enrollment generates a TOTP seed. The seed is encrypted before database
+storage using a dedicated Fernet key that is separate from Flask and JWT secrets.
+
+When MFA is enabled, password login creates a five-minute server-side MFA
+challenge instead of an authenticated session. The challenge must be completed
+with TOTP or an unused recovery code before a session is created.
+
+Challenges:
+
+- are stored server-side,
+- have an attempt limit,
+- are rate-limited,
+- expire quickly, and
+- are atomically consumed so successful challenge replay cannot create another
+  authenticated session.
+
+The last successfully accepted TOTP time step is stored to reject reuse of the
+same or an older TOTP step.
+
+## Recovery codes
+
+Eight high-entropy recovery codes are generated when MFA is enabled. They are
+returned to the user once and stored only as Argon2 hashes.
+
+A successful recovery-code login marks that code used. Reusing the same code
+fails.
+
+Regenerating recovery codes replaces all previous recovery-code hashes.
+
+## MFA lifecycle
+
+Enabling MFA revokes sessions created before MFA was active, forcing subsequent
+authentication through the second factor.
+
+Disabling MFA requires:
+
+1. a fresh access token,
+2. the current password, and
+3. TOTP or an unused recovery code.
+
+Disabling MFA revokes all sessions and removes stored MFA material.
 
 ## Authorization
 
-The API implements owner-or-admin authorization for user records. The `/users`
-collection and destructive user deletion are admin-only. User-controlled update
-requests cannot modify `role`, preventing mass-assignment privilege escalation.
+The API uses owner-or-admin authorization for user records. User-controlled
+updates cannot change roles. Admin-only destructive actions and account
+mutations require a fresh token.
 
-JWT role claims are intentionally not used for authorization. The current role is
-read from the database so a stale token cannot preserve old privileges.
+Self-service email changes additionally require the user's current password.
 
-## Input and response hardening
-
-JSON bodies are validated before use. Email addresses use `email-validator`;
-usernames follow a strict allow-list; passwords use a 12-128 character length
-policy plus a small deny-list and user-identifier checks. Request bodies are
-capped at 16 KiB.
-
-Responses include request correlation IDs and defensive headers:
-`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, a restrictive
-API-oriented Content Security Policy, and `Cache-Control: no-store`. HSTS is
-emitted only in production mode where HTTPS is expected.
+JWT role claims are not used for authorization; current role state is read from
+the database.
 
 ## Security observability
 
 Security-relevant events are persisted in `audit_events` and emitted through
-application logging. Event payloads are intentionally minimal and must never
-contain passwords, raw access tokens, or refresh tokens.
+application logging. Raw passwords, JWTs, TOTP seeds, and recovery codes are not
+stored in audit event payloads.
 
-Important event types include login failures, temporary lockouts, successful
-login, token refresh, refresh-token reuse detection, session revocation,
-password changes, and authorization denials.
+Authenticated users can inspect their own recent events through
+`GET /security-events`.
+
+## Input and response hardening
+
+The API validates JSON input, normalized email addresses, allow-listed
+usernames, password length, and password/user-identifier overlap. Request bodies
+are capped at 16 KiB.
+
+Responses include request correlation IDs, `X-Content-Type-Options`,
+`X-Frame-Options`, `Referrer-Policy`, a restrictive API-oriented Content
+Security Policy, and `Cache-Control: no-store`. HSTS is added in production
+mode.
+
+## Schema management
+
+Database schema evolution uses Flask-Migrate/Alembic rather than relying on
+`db.create_all()`. CI applies the committed migration chain to a fresh database
+before running application tests.
 
 ## Deployment boundary
 
-`memory://` rate-limit storage and SQLite are convenient local defaults.
-Multi-worker or multi-instance deployment should configure a shared rate-limit
-backend and a production database. Forwarding headers should only be trusted
-after configuring a known reverse proxy; the application intentionally does not
-blindly trust client-supplied forwarding headers.
+SQLite and `memory://` rate-limit storage are local-development defaults.
+Distributed deployment should use a production database and shared rate-limit
+backend. Proxy forwarding headers should only be trusted behind a configured,
+known reverse proxy.
+
+TOTP itself is not phishing-resistant. Stronger production assurance may require
+WebAuthn/passkeys or hardware-backed authenticators.
