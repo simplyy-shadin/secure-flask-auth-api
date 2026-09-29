@@ -25,6 +25,7 @@ def _serialize_user(user):
         "username": user.username,
         "email": user.email,
         "role": user.role,
+        "mfa_enabled": user.mfa_enabled,
         "created_at": user.created_at.isoformat() + "Z",
     }
 
@@ -82,7 +83,7 @@ def get_user(user_id):
 
 
 @users_bp.put("/users/<int:user_id>")
-@jwt_required()
+@jwt_required(fresh=True)
 def update_user(user_id):
     current = _current_user()
     if current is None:
@@ -105,13 +106,25 @@ def update_user(user_id):
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return jsonify(error="Invalid JSON body", code="invalid_request"), 400
-    if set(data) - {"email"}:
+
+    is_self_change = current.id == user.id
+    allowed_fields = {"email", "current_password"} if is_self_change else {"email"}
+    if set(data) - allowed_fields:
         return jsonify(
             error="Only email can be updated here",
             code="validation_error",
         ), 400
     if "email" not in data:
         return jsonify(error="Email is required", code="validation_error"), 400
+
+    if is_self_change:
+        password = data.get("current_password")
+        if not isinstance(password, str) or not current.check_password(password):
+            record_event("USER_EMAIL_CHANGE_FAILURE", user_id=current.id)
+            return jsonify(
+                error="Current password is incorrect",
+                code="authentication_failed",
+            ), 401
 
     try:
         email = normalize_email(data["email"])
@@ -141,7 +154,7 @@ def update_user(user_id):
 
 
 @users_bp.delete("/users/<int:user_id>")
-@jwt_required()
+@jwt_required(fresh=True)
 def delete_user(user_id):
     current = _current_user()
     if not _is_admin(current):
