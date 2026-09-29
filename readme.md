@@ -1,154 +1,221 @@
-# 🔐 Secure Flask Authentication API
+# Secure Flask Authentication API
 
-![Python](https://img.shields.io/badge/Python-3.x-blue)
-![Flask](https://img.shields.io/badge/Flask-API-black)
-![JWT](https://img.shields.io/badge/Auth-JWT-green)
-![Security](https://img.shields.io/badge/Security-Hardened-red)
+A security-engineering project focused on **authentication, JWT/session lifecycle
+security, authorization, abuse resistance, and API security testing**.
 
-A production-style authentication API built using Flask that implements secure user authentication with JWT, refresh tokens, token blacklisting, and role-based access control.
+This repository is deliberately not a generic DevSecOps demo. Its purpose is to
+show how authentication systems fail and how those failure modes can be designed,
+implemented, and tested defensively.
 
----
+## Security architecture
 
-## 🚀 Features
+```text
+Client
+  |
+  v
+Authentication API
+  |
+  +-- Password security -------- Argon2id
+  +-- Login abuse defense ------ IP throttling + temporary account lock
+  +-- Access token ------------ short-lived JWT (10 min)
+  +-- Refresh token ----------- rotating, session-bound JWT
+  +-- Server-side session ----- revocable source of truth
+  +-- Authorization ----------- owner-or-admin + RBAC
+  +-- Audit trail ------------- security event records + request IDs
 
-- User Registration & Login
-- JWT Authentication (Access + Refresh Tokens)
-- Token Refresh System
-- Token Blacklisting (Secure Logout)
-- Role-Based Access Control (Admin/User)
-- Rate Limiting (Brute-force Protection)
-- Input Validation & Error Handling
-- Secure Password Hashing
-- Request Logging
+Refresh replay
+  -> old refresh JTI detected
+  -> session revoked
+  -> access tokens from that session become unusable
+```
 
----
+## Security controls
 
-## 🧠 Security Features
+- Argon2id password hashing
+- 12-128 character password policy with weak-password checks
+- Access + refresh JWT separation
+- Server-side authentication sessions
+- Refresh-token rotation
+- Refresh-token replay detection
+- Session revocation on logout
+- Logout from all sessions
+- Password-change session invalidation
+- User-visible active session inventory and revocation
+- Role-based access control
+- Owner-or-admin object authorization against BOLA/IDOR
+- Mass-assignment protection for privileged fields
+- Generic login and duplicate-registration responses
+- Dummy password verification for unknown users to reduce obvious timing differences
+- IP login throttling and temporary per-account lockout
+- Request-size limits
+- Structured security audit events
+- Request correlation IDs
+- Defensive response headers
+- Controlled JSON/JWT/error responses
+- Attack-focused automated tests
 
-- Short-lived access tokens
-- Refresh token-based session management
-- Token revocation using blacklist
-- Protection against IDOR
-- Brute-force protection
-- Secrets managed using `.env`
-- No hardcoded sensitive data
+See [Threat Model](docs/THREAT_MODEL.md),
+[Security Controls](docs/SECURITY_CONTROLS.md), and
+[API Security Tests](docs/API_SECURITY_TESTS.md).
 
----
+## Authentication lifecycle
 
-## 🛠️ Tech Stack
+```text
+LOGIN
+  |
+  +--> server-side session
+          |
+          +--> short-lived access token
+          |
+          +--> refresh token (JTI stored server-side)
+                    |
+                    v
+                 REFRESH
+                    |
+          current JTI matches?
+              /           \
+            yes            no
+             |              |
+        rotate token    replay detected
+             |              |
+        replace JTI     revoke session
+```
 
-- Python (Flask)
-- Flask-JWT-Extended
-- Flask-SQLAlchemy
-- Flask-Limiter
-- SQLite
+A valid JWT signature is therefore not enough by itself. The associated
+server-side session must still be valid.
 
----
+## API endpoints
 
-## 📦 Installation
+### Authentication and sessions
 
-### 1. Clone Repository
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `POST` | `/register` | Register a user |
+| `POST` | `/login` | Create a server-side session and token pair |
+| `POST` | `/refresh` | Rotate refresh token and issue a new token pair |
+| `POST` | `/logout` | Revoke current session |
+| `POST` | `/logout-all` | Revoke every session for the user |
+| `GET` | `/sessions` | View active sessions |
+| `DELETE` | `/sessions/<id>` | Revoke one owned session |
+| `PUT` | `/password` | Change password and revoke all sessions |
+
+### Users
+
+| Method | Endpoint | Authorization |
+|---|---|---|
+| `GET` | `/profile` | Current user |
+| `GET` | `/users` | Admin |
+| `GET` | `/users/<id>` | Owner or admin |
+| `PUT` | `/users/<id>` | Owner or admin; email only |
+| `DELETE` | `/users/<id>` | Admin |
+
+## Local setup
 
 ```bash
-git clone https://github.com/yourusername/secure-flask-auth-api.git
+git clone https://github.com/simplyy-shadin/secure-flask-auth-api.git
 cd secure-flask-auth-api
-```
-### 2. Create Virtual Environment
-```bash 
-python -m venv venv
-```
-### 3. Activate Environment
-#### Windows
-```bash
-venv\Scripts\activate
-```
-#### Linux / Mac
-```bash
-source venv/bin/activate
-```
-### 4. Install Dependencies
-```bash
-pip install -r requirements.txt
-```
-### 5. Setup Environment Variables
 
-Create .env file:
-```bash
-SECRET_KEY=your-secret-key
-JWT_SECRET_KEY=your-jwt-secret
+python -m venv .venv
+source .venv/bin/activate          # Linux/macOS
+# .venv\Scripts\activate         # Windows
+
+pip install -r requirements-dev.txt
+cp .env.example .env
 ```
 
-### 6. Run Application
-```bash
-python app.py
-```
-Server runs at:
+Generate two different random secrets of at least 32 characters and put them in
+`.env`:
 
-http://127.0.0.1:5000
-
-### 🔑 Authentication Flow
 ```bash
-Login → Access + Refresh Token
-       ↓
-Use Access Token → Access APIs
-       ↓
-Token Expired
-       ↓
-Use Refresh Token → New Access Token
-       ↓
-Logout → Tokens Revoked
-```
-## 📡 API Endpoints
-### Authentication
-```bash
-Method	Endpoint	Description
-POST	/register	Register user
-POST	/login	    Login user
-POST	/refresh	Get new access token
-POST	/logout	    Logout user
-```
-### Protected
-```bash
-Method	Endpoint	  Description
-GET	    /profile	  Get user profile
-GET	    /users	      Admin only
-GET	    /users/<id>	  Get user
-PUT	    /users/<id>	  Update user
-DELETE	/users/<id>	  Delete user
+python -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
 
-## 📁 Project Structure
+Initialize the database and run the API:
+
 ```bash
+flask --app app.py init-db
+flask --app app.py run
+```
+
+Create an administrator without exposing a role-change API:
+
+```bash
+flask --app app.py create-admin
+```
+
+The command prompts for the password without echoing it.
+
+## Testing
+
+```bash
+pytest --cov=secure_api --cov-report=term-missing
+ruff check .
+```
+
+The test suite covers refresh-token replay, logout revocation, password-change
+session invalidation, account lockout, BOLA/IDOR, RBAC, privileged-field
+injection, malformed JSON, authentication enforcement, session revocation, and
+security response headers.
+
+GitHub Actions runs the same focused test suite and lint checks on pull requests
+and pushes to `main`. The CI is intentionally small because this repository's
+engineering focus is the authentication system itself rather than security
+scanner orchestration.
+
+## Configuration
+
+| Variable | Purpose | Local default |
+|---|---|---|
+| `SECRET_KEY` | Flask secret | required |
+| `JWT_SECRET_KEY` | JWT signing secret | required |
+| `DATABASE_URL` | SQLAlchemy database URL | `sqlite:///users.db` |
+| `RATELIMIT_STORAGE_URI` | Flask-Limiter backend | `memory://` |
+| `APP_ENV` | Enables production-only behavior such as HSTS | `development` |
+
+For multi-process or multi-instance deployments, use a production database and
+shared rate-limit storage. Configure forwarding headers only behind a trusted
+reverse proxy.
+
+## Repository structure
+
+```text
+.
 ├── app.py
 ├── config.py
-├── models.py
+├── secure_api/
+│   ├── __init__.py
+│   ├── auth.py
+│   ├── audit.py
+│   ├── extensions.py
+│   ├── models.py
+│   ├── security.py
+│   └── users.py
+├── tests/
+│   ├── conftest.py
+│   ├── test_api_security.py
+│   ├── test_auth.py
+│   └── test_authorization.py
+├── docs/
+│   ├── API_SECURITY_TESTS.md
+│   ├── SECURITY_CONTROLS.md
+│   └── THREAT_MODEL.md
+├── SECURITY.md
 ├── requirements.txt
-├── .env.example
-├── .gitignore
-└── users.db
+├── requirements-dev.txt
+└── .github/workflows/ci.yml
 ```
-## ⚠️ Important Notes
-- .env is not included for security
-- Use .env.example as reference
-- SQLite is for development only
-- Use PostgreSQL/MySQL in production
 
-## 🧠 Future Improvements
-- Refresh token rotation
-- Token cleanup system
-- Device/IP binding
-- HTTPS deployment
-- SIEM integration
+## Project scope
 
-## 👨‍💻 Author
+This project intentionally goes deep on **authentication and API security**.
+Infrastructure-as-code scanning, container orchestration, broad SAST/SCA
+pipelines, cloud deployment automation, and full DevSecOps platform concerns are
+kept outside the core project so this repository retains a clear
+security-engineering identity.
 
-Shadin K V
+## Author
 
-Cybersecurity Enthusiast
+**Shadin K V**
 
-## ⭐ Connect with me
-If you found this project inspiring, don’t forget to star the repo!
-
-Let's connect on 🤝 [![LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-blue?style=flat&logo=linkedin)](www.linkedin.com/in/shadin-k-v-cybersecurity)
-
-Medium ✍️ [![Medium](https://img.shields.io/badge/Medium-Read-black?style=flat&logo=medium)](https://medium.com/@shdnkval)
+Cybersecurity student focused on Security Engineering, Application Security,
+and offensive/defensive security.
