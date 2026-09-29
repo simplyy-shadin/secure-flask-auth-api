@@ -1,13 +1,5 @@
-from datetime import timedelta
-from uuid import uuid4
-
 from flask import Blueprint, current_app, jsonify, request
-from flask_jwt_extended import (
-    create_access_token,
-    get_jwt,
-    get_jwt_identity,
-    jwt_required,
-)
+from flask_jwt_extended import get_jwt, get_jwt_identity, jwt_required
 from sqlalchemy import update
 
 from .audit import record_event
@@ -22,7 +14,6 @@ from .mfa import (
     verify_totp,
 )
 from .models import MfaChallenge, MfaRecoveryCode, User, utcnow
-from .security import source_ip
 from .session_service import create_session, issue_token_pair, revoke_sessions
 
 
@@ -32,29 +23,6 @@ mfa_bp = Blueprint("mfa", __name__)
 def _json_body():
     data = request.get_json(silent=True)
     return data if isinstance(data, dict) else None
-
-
-def create_login_challenge(user):
-    challenge = MfaChallenge(
-        id=str(uuid4()),
-        user_id=user.id,
-        expires_at=utcnow()
-        + timedelta(minutes=current_app.config["MFA_CHALLENGE_MINUTES"]),
-        source_ip=source_ip(),
-    )
-    db.session.add(challenge)
-    mfa_token = create_access_token(
-        identity=str(user.id),
-        additional_claims={
-            "stage": "mfa_login",
-            "cid": challenge.id,
-        },
-        expires_delta=timedelta(
-            minutes=current_app.config["MFA_CHALLENGE_MINUTES"]
-        ),
-        fresh=False,
-    )
-    return challenge, mfa_token
 
 
 @mfa_bp.post("/mfa/verify-login")
@@ -101,8 +69,6 @@ def verify_login_mfa():
         )
         return jsonify(error="Invalid verification code", code="mfa_failed"), 401
 
-    # Claim the challenge atomically so concurrent/replayed requests cannot both
-    # create authenticated sessions.
     claimed = db.session.execute(
         update(MfaChallenge)
         .where(
@@ -222,8 +188,6 @@ def enable_mfa():
     )
     replace_recovery_codes(user, codes)
 
-    # Eliminate sessions created before MFA was enabled so all future sessions
-    # must satisfy the new second factor.
     revoked = revoke_sessions(user.id, "mfa_enabled")
     db.session.commit()
     record_event(
