@@ -34,6 +34,9 @@ jobs:
       - name: Lint
         run: ruff check .
 
+      - name: Validate OpenAPI contract
+        run: openapi-spec-validator openapi.yaml
+
       - name: Validate database migration
         run: flask --app app.py db upgrade
 
