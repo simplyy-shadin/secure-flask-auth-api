@@ -1,26 +1,26 @@
-# ---------------- ENV ----------------
+# Secrets
 .env
 
-# ---------------- PYTHON ----------------
+# Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
-# ---------------- VENV ----------------
+# Virtual environments
+.venv/
 venv/
 env/
 
-# ---------------- DATABASE ----------------
+# Runtime data
 *.db
 instance/
-
-# ---------------- LOGS ----------------
 *.log
 
-# ---------------- VS CODE ----------------
+# IDE / OS
 .vscode/
-
-# ---------------- OS FILES ----------------
+.idea/
 .DS_Store
 Thumbs.db
