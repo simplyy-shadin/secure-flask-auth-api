@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerifyMismatchError
@@ -10,7 +10,8 @@ password_hasher = PasswordHasher()
 
 
 def utcnow():
-    return datetime.utcnow()
+    # SQLAlchemy columns are intentionally stored as naive UTC timestamps.
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 class User(db.Model):
