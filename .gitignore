@@ -1,26 +1,19 @@
-# ---------------- ENV ----------------
 .env
-
-# ---------------- PYTHON ----------------
+.env.*
+!.env.example
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
-
-# ---------------- VENV ----------------
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 venv/
+.venv/
 env/
-
-# ---------------- DATABASE ----------------
 *.db
 instance/
-
-# ---------------- LOGS ----------------
 *.log
-
-# ---------------- VS CODE ----------------
 .vscode/
-
-# ---------------- OS FILES ----------------
+.idea/
 .DS_Store
 Thumbs.db
